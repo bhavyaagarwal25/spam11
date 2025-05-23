@@ -21,6 +21,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.Random;
 
 public class SmsReceiver extends BroadcastReceiver {
@@ -28,9 +29,7 @@ public class SmsReceiver extends BroadcastReceiver {
     private static final String TAG = "SmsReceiver";
     private static final String CHANNEL_ID = "spam_channel_id";
     private static final Random random = new Random();
-
-    // ✅ Update this with your actual backend IP
-    private static final String BACKEND_URL = "http://192.168.32.17:5000/predict";
+    private static final String BACKEND_URL = "http://192.168.34.17:5000/predict"; // Your backend URL
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -53,9 +52,16 @@ public class SmsReceiver extends BroadcastReceiver {
                             fullMessage.append(sms.getMessageBody());
                         }
 
-                        String messageText = fullMessage.toString();
-                        if (sender != null && !messageText.isEmpty()) {
-                            sendSmsToBackend(context, sender, messageText);
+                        final String messageText = fullMessage.toString();
+                        final String messageSender = sender;
+
+                        if (messageSender != null && !messageText.isEmpty()) {
+                            Log.d(TAG, "Sender: " + messageSender);
+                            Log.d(TAG, "Message: " + messageText);
+
+                            showNotification(context, "SMS from: " + messageSender, messageText);
+
+                            sendSmsToBackend(context, messageSender, messageText);
                         }
                     }
                 } catch (Exception e) {
@@ -67,6 +73,10 @@ public class SmsReceiver extends BroadcastReceiver {
     }
 
     private void sendSmsToBackend(Context context, String sender, String message) {
+        final Context appContext = context.getApplicationContext();
+        final String finalSender = sender;
+        final String finalMessage = message;
+
         new Thread(() -> {
             HttpURLConnection conn = null;
             try {
@@ -80,16 +90,16 @@ public class SmsReceiver extends BroadcastReceiver {
                 conn.setReadTimeout(5000);
 
                 JSONObject jsonInput = new JSONObject();
-                jsonInput.put("text", message);
+                jsonInput.put("text", finalMessage);
 
                 try (OutputStream os = conn.getOutputStream()) {
-                    byte[] input = jsonInput.toString().getBytes("utf-8");
+                    byte[] input = jsonInput.toString().getBytes(StandardCharsets.UTF_8);
                     os.write(input, 0, input.length);
                 }
 
                 int code = conn.getResponseCode();
                 if (code == 200) {
-                    BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), "utf-8"));
+                    BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
                     StringBuilder response = new StringBuilder();
                     String line;
                     while ((line = br.readLine()) != null) {
@@ -98,21 +108,21 @@ public class SmsReceiver extends BroadcastReceiver {
 
                     JSONObject responseJson = new JSONObject(response.toString());
                     String prediction = responseJson.optString("prediction", "unknown");
-
-                    String title = prediction.equalsIgnoreCase("spam")
+                    Log.d(TAG, "Prediction for SMS: " + prediction);
+                    String resultTitle = prediction.equalsIgnoreCase("spam")
                             ? "⚠ Spam Message Detected!"
-                            : "✔ Message is Safe";
-                    String body = "From: " + sender + "\n" + message;
+                            : "✔ Safe Message";
+                    String resultBody = "From: " + finalSender + "\n" + finalMessage;
 
-                    showNotification(context, title, body);
+                    showNotification(appContext, resultTitle, resultBody);
                 } else {
                     Log.e(TAG, "API call failed. HTTP code: " + code);
-                    showNotification(context, "Error", "Failed to check spam status.");
+                    showNotification(appContext, "Error", "Failed to check spam status.");
                 }
 
             } catch (Exception e) {
                 Log.e(TAG, "Error sending to backend", e);
-                showNotification(context, "Connection Error", "Unable to connect to spam detection service.");
+                showNotification(appContext, "Connection Error", "Unable to connect to spam detection service.");
             } finally {
                 if (conn != null) {
                     conn.disconnect();
@@ -124,6 +134,7 @@ public class SmsReceiver extends BroadcastReceiver {
     private void showNotification(Context context, String title, String message) {
         NotificationManager notificationManager =
                 (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+
         if (notificationManager == null) {
             Log.e(TAG, "NotificationManager is null");
             return;
@@ -134,22 +145,27 @@ public class SmsReceiver extends BroadcastReceiver {
         Intent intent = new Intent(context, MainActivity.class);
         intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            flags |= PendingIntent.FLAG_MUTABLE;
+        }
+
         PendingIntent pendingIntent = PendingIntent.getActivity(
                 context,
                 random.nextInt(),
                 intent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                flags
         );
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentTitle(title)
-                .setContentText(message.length() > 60 ? message.substring(0, 60) + "..." : message)
+                .setContentText(message.length() > 50 ? message.substring(0, 50) + "..." : message)
                 .setStyle(new NotificationCompat.BigTextStyle().bigText(message))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)
-                .setVibrate(new long[]{100, 200, 300, 400, 500})
+                .setVibrate(new long[]{100, 200, 300})
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
 
         notificationManager.notify(random.nextInt(), builder.build());
@@ -162,15 +178,15 @@ public class SmsReceiver extends BroadcastReceiver {
                     "Spam Detection Notifications",
                     NotificationManager.IMPORTANCE_HIGH
             );
-            channel.setDescription("Alerts when spam messages are detected.");
+            channel.setDescription("Alerts for SMS messages and spam detection");
             channel.enableVibration(true);
-            channel.setVibrationPattern(new long[]{100, 200, 300, 400, 500});
+            channel.setVibrationPattern(new long[]{100, 200, 300});
             notificationManager.createNotificationChannel(channel);
         }
     }
 
-    // Optional: Manual test
+    // Optional: for testing without SMS
     public static void testNotification(Context context) {
-        new SmsReceiver().showNotification(context, "Test", "This is a test notification from SpamShield.");
+        new SmsReceiver().showNotification(context, "Test", "This is a test SMS for spam detection!");
     }
 }

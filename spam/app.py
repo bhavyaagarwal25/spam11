@@ -15,9 +15,6 @@ def predict():
     if not text:
         return jsonify({"error": "No text provided"}), 400
 
-    # Transform text using vectorizer
-
-
     # Predict
     pred = model.predict([text])[0]
     result = 'spam' if pred == 1 else 'not_spam'

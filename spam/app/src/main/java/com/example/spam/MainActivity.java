@@ -1,22 +1,22 @@
 package com.example.spam;
+
 import android.Manifest;
-import android.content.Context;
-import android.content.Intent; //to start new activity or open system settings
-import android.content.pm.PackageManager;//to check if permision is granted
-import android.net.Uri;//for handling uri
-import android.os.Build;//to check android version at runtime
-import android.os.Bundle;//data passed between activities
-import android.os.Handler;
-import android.os.Looper;
-import android.provider.Settings;//to open app settings
-import android.widget.Button;//for button
-import android.widget.Toast;//small popup message
-import androidx.activity.result.ActivityResultLauncher;//to handle permision request in runtime
-import androidx.activity.result.contract.ActivityResultContracts;//to handle permision request
-import androidx.appcompat.app.AlertDialog;//to show dialog box
-import androidx.appcompat.app.AppCompatActivity; // for base activity
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.Bundle;
+import android.provider.Telephony;
+import android.widget.Button;
+import android.widget.Toast;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
-import org.json.JSONObject; //json object to read and write
+
+import org.json.JSONObject;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -30,149 +30,118 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 
 public class MainActivity extends AppCompatActivity {
-    private static final String KEY_TEXT = "text";
+
+    /* ---------------- constants ---------------- */
+    private static final String KEY_TEXT       = "text";
     private static final String KEY_PREDICTION = "prediction";
-    private static final String[] REQUIRED_PERMISSIONS = {
+    private static final String API_URL        = "http://192.168.34.17:5000/predict";
+
+    /* runtime-permissions */
+    private static final String[] CORE_PERMS = {
             Manifest.permission.RECEIVE_SMS,
             Manifest.permission.READ_SMS,
+            Manifest.permission.SEND_SMS,
             Manifest.permission.READ_PHONE_STATE,
             Manifest.permission.READ_CALL_LOG,
-            Manifest.permission.CALL_PHONE
+            Manifest.permission.CALL_PHONE,
+            Manifest.permission.POST_NOTIFICATIONS   // Android 13+ notifications
     };
 
-    private static final String NOTIFICATION_PERMISSION = Manifest.permission.POST_NOTIFICATIONS;
-
+    /* ---------------- members ---------------- */
     private ActivityResultLauncher<String[]> permissionLauncher;
+    private OkHttpClient client = new OkHttpClient();
 
-    private OkHttpClient client;
-    private static final String API_URL = "http://192.168.32.17:5000/predict";
-
+    /* ---------------- life-cycle ---------------- */
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        client = new OkHttpClient();
-
+        /* ask for permissions first run */
         permissionLauncher = registerForActivityResult(
                 new ActivityResultContracts.RequestMultiplePermissions(),
-                result -> {
-                    if (allPermissionsGranted()) {
-                        Toast.makeText(this, "✅ All permissions granted", Toast.LENGTH_SHORT).show();
-                    } else {
-                        Toast.makeText(this,
-                                "⚠ Some permissions denied. The app may not work properly.",
-                                Toast.LENGTH_LONG).show();
-                        showSettingsDialog();
-                    }
-                });
+                res -> checkDefaultSmsApp()               // after user answers → check default
+        );
+        requestMissingPerms();                           // may open permission sheet
 
-        checkAndRequestPermissions();
+        /* test button */
+        Button testBtn = findViewById(R.id.testNotificationButton);
+        testBtn.setOnClickListener(v ->
+                sendToApi("Congratulations! You have won a free prize."));
 
-        Button testButton = findViewById(R.id.testNotificationButton);
-        testButton.setOnClickListener(v -> {
-            String smsText = "Congratulations.. You won a prize..!! ";
-            checkSpamWithAPI(smsText);
-        });
+        /* also re-check default every time activity resumes */
+        checkDefaultSmsApp();
     }
 
-    private void checkSpamWithAPI(String message) {
+    /* -------- default SMS prompt -------- */
+    private void checkDefaultSmsApp() {
+        String current = Telephony.Sms.getDefaultSmsPackage(this);
+        if (!getPackageName().equals(current)) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Set Spam Shield as default")
+                    .setMessage("Spam Shield must be the default SMS app to scan every message.")
+                    .setPositiveButton("Set now", (d, w) -> {
+                        Intent i = new Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT);
+                        i.putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, getPackageName());
+                        startActivity(i);
+                    })
+                    .setNegativeButton("Not now", null)
+                    .show();
+        }
+    }
+
+    /* -------- permission helpers -------- */
+    private void requestMissingPerms() {
+        List<String> missing = new ArrayList<>();
+        for (String p : CORE_PERMS) {
+            if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
+                missing.add(p);
+            }
+        }
+        if (!missing.isEmpty()) {
+            permissionLauncher.launch(missing.toArray(new String[0]));
+        }
+    }
+
+    /* -------- call Flask backend -------- */
+    private void sendToApi(@NonNull String msg) {
         try {
             JSONObject json = new JSONObject();
-            json.put(KEY_TEXT, message);
+            json.put(KEY_TEXT, msg);
 
             RequestBody body = RequestBody.create(
                     json.toString(),
-                    MediaType.parse("application/json; charset=utf-8")
-            );
+                    MediaType.parse("application/json; charset=utf-8"));
 
-            Request request = new Request.Builder()
+            Request req = new Request.Builder()
                     .url(API_URL)
                     .post(body)
                     .build();
 
-            client.newCall(request).enqueue(new Callback() {
-                @Override
-                public void onFailure(Call call, IOException e) {
-                    e.printStackTrace();
-                    Context context = null;
-                    new Handler(Looper.getMainLooper()).post(() ->
-                            Toast.makeText(context, "API Failed: " + e.getMessage(), Toast.LENGTH_LONG).show()
-                    );
+            client.newCall(req).enqueue(new Callback() {
+                @Override public void onFailure(@NonNull Call c, @NonNull IOException e) {
+                    runOnUiThread(() ->
+                            Toast.makeText(MainActivity.this,
+                                    "API error: " + e.getMessage(), Toast.LENGTH_LONG).show());
                 }
 
-                @Override
-                public void onResponse(Call call, Response response) throws IOException {
-                    if (response.isSuccessful()) {
-                        String jsonResponse = response.body().string();
-                        runOnUiThread(() -> {
-                            try {
-                                JSONObject json = new JSONObject(jsonResponse);
-                                String prediction = json.getString(KEY_PREDICTION);
-                                Toast.makeText(MainActivity.this, "Prediction: " + prediction, Toast.LENGTH_LONG).show();
-                            } catch (Exception e) {
-                                e.printStackTrace();
-                                Toast.makeText(MainActivity.this, "Failed to parse response", Toast.LENGTH_SHORT).show();
-                            }
-                        });
-                    } else {
-                        runOnUiThread(() -> Toast.makeText(MainActivity.this, "Server error: " + response.code(), Toast.LENGTH_SHORT).show());
-                    }
+                @Override public void onResponse(@NonNull Call c, @NonNull Response r) throws IOException {
+                    String jsonResp = r.body() != null ? r.body().string() : "{}";
+                    runOnUiThread(() -> {
+                        try {
+                            String pred = new JSONObject(jsonResp)
+                                    .optString(KEY_PREDICTION, "unknown");
+                            Toast.makeText(MainActivity.this,
+                                    "Prediction = " + pred, Toast.LENGTH_LONG).show();
+                        } catch (Exception e) {
+                            Toast.makeText(MainActivity.this,
+                                    "Response error", Toast.LENGTH_LONG).show();
+                        }
+                    });
                 }
             });
         } catch (Exception e) {
-            e.printStackTrace();
-            Toast.makeText(this, "Error preparing API request", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "JSON error: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
-    }
-
-    private void checkAndRequestPermissions() {
-        List<String> missingPermissions = new ArrayList<>();
-
-        for (String perm : REQUIRED_PERMISSIONS) {
-            if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
-                missingPermissions.add(perm);
-            }
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, NOTIFICATION_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
-                missingPermissions.add(NOTIFICATION_PERMISSION);
-            }
-        }
-
-        if (missingPermissions.isEmpty()) {
-            Toast.makeText(this, "✅ All permissions already granted", Toast.LENGTH_SHORT).show();
-        } else {
-            permissionLauncher.launch(missingPermissions.toArray(new String[0]));
-        }
-    }
-
-    private boolean allPermissionsGranted() {
-        for (String perm : REQUIRED_PERMISSIONS) {
-            if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
-                return false;
-            }
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, NOTIFICATION_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private void showSettingsDialog() {
-        new AlertDialog.Builder(this)
-                .setTitle("Permissions Required")
-                .setMessage("Some permissions were permanently denied. Please enable them in app settings.")
-                .setPositiveButton("Open Settings", (dialog, which) -> {
-                    Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
-                    Uri uri = Uri.fromParts("package", getPackageName(), null);
-                    intent.setData(uri);
-                    startActivity(intent);
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
     }
 }
